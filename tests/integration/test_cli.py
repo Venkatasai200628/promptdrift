@@ -3,6 +3,8 @@
 import io
 import json
 from pathlib import Path
+from types import SimpleNamespace
+from xml.etree import ElementTree as ET
 
 from rich.console import Console
 from typer.testing import CliRunner
@@ -11,6 +13,28 @@ import promptdrift.cli as cli
 from promptdrift.cli import app
 
 runner = CliRunner()
+
+
+def _patch_check_dependencies(monkeypatch, report):
+    loaded = SimpleNamespace(
+        baseline=SimpleNamespace(store_raw_output=False),
+        policy=None,
+    )
+
+    impact = SimpleNamespace(
+        improved=0,
+        unchanged=0,
+        changed_but_valid=0,
+        regressed=0,
+        impact_radius_percentage=0.0,
+        latency_pct_change=0.0,
+        cost_pct_change=0.0,
+    )
+
+    monkeypatch.setattr(cli, "load_config", lambda config: (loaded, config))
+    monkeypatch.setattr(cli, "orchestrate_check", lambda *args, **kwargs: (report, impact))
+    monkeypatch.setattr(cli, "record_report", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli, "print_impact_report", lambda *args, **kwargs: None)
 
 
 class TestInitCommand:
@@ -405,3 +429,83 @@ class TestIsolatedExecution:
 
         res_purge = runner.invoke(app, ["purge", "--yes"])
         assert res_purge.exit_code == 0
+
+
+class TestJUnitXmlCommand:
+    def test_test_command_writes_junit_xml(self, tmp_path):
+        initialized = runner.invoke(app, ["init", "--directory", str(tmp_path)])
+        assert initialized.exit_code == 0, initialized.output
+
+        output_path = tmp_path / "reports" / "results.xml"
+
+        result = runner.invoke(
+            app,
+            [
+                "test",
+                "--config",
+                str(tmp_path / "promptdrift.yaml"),
+                "--junit-xml",
+                str(output_path),
+            ],
+        )
+
+        assert result.exit_code == 0, result.output
+        assert output_path.is_file()
+
+        root = ET.parse(output_path).getroot()
+        assert root.tag == "testsuites"
+        assert root.find("./testsuite/testcase") is not None
+
+    def test_test_command_writes_xml_before_failure_exit(
+        self, tmp_path, monkeypatch, multi_test_report
+    ):
+        monkeypatch.setattr(
+            cli,
+            "_run",
+            lambda *args, **kwargs: (None, None, multi_test_report),
+        )
+
+        output_path = tmp_path / "results.xml"
+
+        result = runner.invoke(
+            app,
+            ["test", "--junit-xml", str(output_path)],
+        )
+
+        assert result.exit_code == 1
+        assert output_path.is_file()
+
+        root = ET.parse(output_path).getroot()
+        suite = root.find("testsuite")
+
+        assert suite is not None
+        assert suite.attrib["failures"] == "1"
+        assert suite.find(".//failure") is not None
+
+    def test_check_command_writes_xml_before_failure_exit(
+        self, tmp_path, monkeypatch, multi_test_report
+    ):
+        _patch_check_dependencies(monkeypatch, multi_test_report)
+
+        output_path = tmp_path / "reports" / "check-results.xml"
+
+        result = runner.invoke(
+            app,
+            [
+                "check",
+                "--config",
+                str(tmp_path / "promptdrift.yaml"),
+                "--junit-xml",
+                str(output_path),
+            ],
+        )
+
+        assert result.exit_code == 1
+        assert output_path.is_file()
+
+        root = ET.parse(output_path).getroot()
+        suite = root.find("testsuite")
+
+        assert suite is not None
+        assert suite.attrib["failures"] == "1"
+        assert suite.find(".//failure") is not None

@@ -30,7 +30,7 @@ from .errors import (
     TemplateError,
 )
 from .git import GitContext
-from .reports import print_impact_report, print_report, write_html_report
+from .reports import print_impact_report, print_report, write_html_report, write_junit_xml
 from .storage import (
     add_or_update_scenarios,
     get_interactions,
@@ -322,12 +322,18 @@ def check(
         bool, typer.Option("--json", help="Emit machine-readable JSON.")
     ] = False,
     verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
+    junit_xml: Annotated[
+        Path | None,
+        typer.Option("--junit-xml", help="Write a JUnit XML report."),
+    ] = None,
 ) -> None:
     """Git-aware scenario execution and Impact Radius report."""
     try:
         loaded, config_path = load_config(config)
         report, impact = orchestrate_check(loaded, config_path, base_ref=base)
         record_report(report, store_raw_output=loaded.baseline.store_raw_output)
+        if junit_xml is not None:
+            write_junit_xml(report, junit_xml, impact=impact)
 
         if json_output:
             out_data = {
@@ -455,10 +461,17 @@ def test(
         bool, typer.Option("--json", help="Emit machine-readable JSON.")
     ] = False,
     verbose: Annotated[bool, typer.Option("--verbose", "-v")] = False,
+    junit_xml: Annotated[
+        Path | None,
+        typer.Option("--junit-xml", help="Write a JUnit XML report."),
+    ] = None,
 ) -> None:
     """Run behavioral contracts; automatically compares an existing baseline."""
     result = _run(config, with_baseline=True, verbose=verbose)
     if result:
+        if junit_xml is not None:
+            write_junit_xml(result[2], junit_xml)
+
         _emit(result[2], json_output)
 
 
