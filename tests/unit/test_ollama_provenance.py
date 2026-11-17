@@ -37,6 +37,24 @@ def _install_payload(monkeypatch, name: str) -> None:
     monkeypatch.setattr("promptdrift.providers.ollama.httpx.post", fake_post)
 
 
+def _install_payload_sequence(monkeypatch, *fixture_names: str) -> None:
+    payloads = iter(_payload(name) for name in fixture_names)
+
+    def fake_post(url: str, **kwargs):
+        try:
+            payload = next(payloads)
+        except StopIteration:
+            pytest.fail("Unexpected additional Ollama request")
+
+        return httpx.Response(
+            200,
+            json=payload,
+            request=httpx.Request("POST", url),
+        )
+
+    monkeypatch.setattr("promptdrift.providers.ollama.httpx.post", fake_post)
+
+
 def _monitor_config(tmp_path: Path) -> tuple[Config, Path]:
     config_path = tmp_path / "promptdrift.yaml"
     config = Config.model_validate(
@@ -81,11 +99,11 @@ def test_generate_fixture_normalizes_supported_metadata(monkeypatch):
     [
         (
             "generate_metadata_changed.json",
-            "changed (supporting signal only)",
+            "Provider-reported response_model_hash changed (supporting signal only).",
         ),
         (
             "generate_metadata_absent.json",
-            "unavailable on one side; no equality claim is possible",
+            "Provider-reported response_model_hash is unavailable on one side; no equality claim is possible.",
         ),
     ],
 )
@@ -100,6 +118,44 @@ def test_ollama_metadata_change_or_absence_stays_supporting_or_uncertain(
 
     assert report.tests[0].diagnosis == "stable"
     assert any(expected_evidence in item for item in report.tests[0].evidence)
+
+
+def test_monitor_detects_ollama_model_change_across_two_samples(tmp_path, monkeypatch):
+    config, config_path = _monitor_config(tmp_path)
+    _write_baseline(config, config_path, monkeypatch)
+
+    _install_payload_sequence(
+        monkeypatch,
+        "generate_with_metadata.json",
+        "generate_metadata_changed.json",
+    )
+
+    report = monitor_suite(config, config_path, samples=2)
+
+    expected = "Provider-reported response_model_hash changed (supporting signal only)."
+
+    assert report.tests[0].samples == 2
+    assert expected in report.tests[0].evidence
+    assert report.tests[0].diagnosis == "stable"
+
+
+def test_monitor_does_not_report_model_change_when_model_is_unchanged(tmp_path, monkeypatch):
+    config, config_path = _monitor_config(tmp_path)
+    _write_baseline(config, config_path, monkeypatch)
+
+    _install_payload_sequence(
+        monkeypatch,
+        "generate_with_metadata.json",
+        "generate_with_metadata.json",
+    )
+
+    report = monitor_suite(config, config_path, samples=2)
+
+    assert report.tests[0].samples == 2
+    assert not any(
+        "Provider-reported response_model_hash changed" in item for item in report.tests[0].evidence
+    )
+    assert report.tests[0].diagnosis == "stable"
 
 
 def test_monitor_history_does_not_persist_raw_ollama_payload(tmp_path, monkeypatch):
